@@ -37,8 +37,8 @@ incl = dist < TO_BAND
 incl = (incl.reshape(nx, ny, nz) | incl.reshape(nx, ny, nz)[::-1]).ravel()
 rs = np.hypot(C[:, 0] - PEN_C[0], C[:, 1] - PEN_C[1])
 solid = incl & (dist < 1.6) & (RIM[idx] < 3.0)
-solid |= incl & (rs < PEN_RB + 1.5) & (C[:, 2] < PEN_ZB + 3)                      # socket floor
-trough = (np.abs(C[:, 1] - TROUGH[0]) < 3.0) & (C[:, 2] < TROUGH[1] + 3.0) & (np.abs(C[:, 0]) < 47)
+solid |= incl & (rs < PEN_RB + 3.0) & (C[:, 2] < PEN_ZB + 4) & (dist < 1.6)       # socket bottom ring
+trough = (np.abs(C[:, 1] - TROUGH[0]) < 3.0) & (C[:, 2] < TROUGH[1] + 3.0) & (np.abs(C[:, 0]) < CARD_SUPPORT + 2)
 solid |= incl & trough & (dist < 1.6)
 solid = (solid.reshape(nx, ny, nz) | solid.reshape(nx, ny, nz)[::-1]).ravel() & incl
 active = incl & ~solid
@@ -90,7 +90,7 @@ F = np.zeros((ndof, 4))
 def add(mask, vec, col):
     ids = np.flatnonzero(mask); assert ids.size, col
     for d in range(3): F[3 * ids + d, col] += vec[d] / ids.size
-inx = (NX > CARD_X0) & (NX < CARD_X1)
+inx = np.abs(NX) < CARD_SUPPORT
 add(inx & (np.abs(NY - TROUGH[0]) < 2.5) & (np.abs(NZ - TROUGH[1]) < 2.5), (0, 0, -4.0), 0)
 zc_top = TROUGH[1] + CARD_H * np.cos(CARD_TILT) - 8
 ysail = 21.0 + (zc_top - 13.0) * np.tan(CARD_TILT)

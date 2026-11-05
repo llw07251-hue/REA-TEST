@@ -19,22 +19,25 @@ CARD_TILT = np.deg2rad(15.0)
 CARD_X0, CARD_X1 = -45.0, 45.0
 TROUGH = np.array([18.0, 7.6])
 
-ELL_A, ELL_B, ELL_YC = 56.0, 50.0, 34.0   # near-circular footprint (ellipse, ratio 1.12)
+ELL_A, ELL_B, ELL_YC = 46.0, 46.0, 34.0   # circular footprint, dia 92 mm
+CARD_SUPPORT = 30.0                      # half width of the card trough: cards held over 2/3 of 90 mm
+BAND_H, BAND_ANG = 7.0, np.deg2rad(86.0)  # crisp 86 deg base band
+Y_CUT = 4.0                              # straight front cut of the circular footprint
 PEN_C = np.array([0.0, 45.0])       # pen socket axis (x, y)
-PEN_ZB = 11.0                       # socket floor height
-PEN_RB = 4.6                        # floor radius (pen tip cone sits here)
+PEN_ZB = 2.5                        # socket bottom (open through-hole near the desk)
+PEN_RB = 5.2                        # through-hole radius: any pen tip passes and rests on the desk
 PEN_DRAFT = np.deg2rad(10.0)        # wall draft from vertical -> nestable
 SHELL_T = 1.4
 RHO_PA11 = 1.05e-3
 
 def crest_h(x):
-    a = np.clip(np.abs(x) / 62.0, 0, 1)
+    a = np.clip(np.abs(x) / 48.0, 0, 1)
     return 40.0 + 24.0 * (1 - a ** 2) ** 1.6          # 64 mm peak at the centre
 
 def profile_pts(x):
     """section at station x (feet at the ellipse extremes; the radial dome
     trims it to the near-circular footprint)"""
-    a = np.clip(np.abs(x) / 62.0, 0, 1)
+    a = np.clip(np.abs(x) / 48.0, 0, 1)
     H = crest_h(x)
     ys = 21.0 + (H - 8 - 13.0) * np.tan(CARD_TILT)
     lean = 6.0 * a ** 2
@@ -84,12 +87,17 @@ def heightfield(g=0.3):
             S[ii, ok] = np.interp(ys[ok], C[:, 0], s)
             SN[ii, ok] = S[ii, ok] / s[-1]
     X, Y = np.meshgrid(xs, ys, indexing='ij')
-    inside = np.isfinite(H) & (ell_rho(X, Y) <= 1.0)
+    inside = np.isfinite(H) & (ell_rho(X, Y) <= 1.0) & (Y >= Y_CUT)
     r = np.hypot(X - PEN_C[0], Y - PEN_C[1])
     zw = PEN_ZB + np.maximum(r - PEN_RB, 0) / np.tan(PEN_DRAFT)
-    Hs = smin(np.nan_to_num(H, nan=0.0), end_dome(X, Y), 6.0)     # closed, flowing ends
+    rr_ = np.clip(ell_rho(X, Y), 0, 1)
+    dout = np.maximum(np.minimum((1 - rr_) * ELL_A, Y - Y_CUT), 0)         # distance in from the D-shaped outline
+    band = np.minimum(dout * np.tan(BAND_ANG), BAND_H)                      # 86 deg base band
+    smax = lambda a, b, k: -smin(-a, -b, k)
+    Hs = smin(smax(np.nan_to_num(H, nan=0.0), band, 1.5), smax(end_dome(X, Y), band, 1.5), 6.0)
+    Hs = smin(Hs, (Y - Y_CUT) * np.tan(BAND_ANG) + 0.0, 1.0)              # crisp 86 deg front cut
     Hs = np.maximum(smin(Hs, zw, 3.0), 0.0)
-    inside &= ~(r < 1.7)                              # drain / depowder hole in the socket floor
+    inside &= ~(r < PEN_RB)                           # pen through-hole
     Hs[~inside] = np.nan
     return xs, ys, Hs, S, inside
 

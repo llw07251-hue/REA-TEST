@@ -33,7 +33,8 @@ def sample(ds=0.2, g=0.3, seed=3):
     # boundary (free edges + feet) vertices
     e, cnt = np.unique(mesh.edges_sorted, axis=0, return_counts=True)
     bverts = np.unique(e[cnt == 1].ravel())
-    rim_v = cKDTree(mesh.vertices[bverts]).query(mesh.vertices, workers=4)[0]
+    rim_v, bi = cKDTree(mesh.vertices[bverts]).query(mesh.vertices, workers=4)
+    gdir = mesh.vertices - mesh.vertices[bverts][bi]            # growth direction: away from the nearest edge
     K = curvature_grid(xs, ys, H, m, g)
     X, Y = np.meshgrid(xs, ys, indexing='ij')
     Kv = K[m]
@@ -56,4 +57,9 @@ def sample(ds=0.2, g=0.3, seed=3):
     N2 = N * [-1, 1, 1]
     N = np.vstack([N, N2]); N /= np.linalg.norm(N, axis=1, keepdims=True)
     att['n'] = N
+    G = np.stack([lerp(gdir[:, k]) for k in range(3)], 1)[keep]
+    G = np.vstack([G, G * [-1, 1, 1]])
+    G -= (G * N).sum(1, keepdims=True) * N                        # tangent part
+    G /= np.linalg.norm(G, axis=1, keepdims=True) + 1e-9
+    att['g'] = G
     return P, att, mesh

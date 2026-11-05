@@ -48,10 +48,23 @@ def rho_at(X):
     return np.clip(ndimage.map_coordinates(rho_n, c, order=1, mode='nearest'), 0, 1)
 r = rho_at(P)
 rs = np.hypot(P[:, 0] - PEN_C[0], P[:, 1] - PEN_C[1])
-# ---- edge-graded cell size: dense on edges & creases, wide on flats
-flat = np.clip((RIM - 1.5) / 14.0, 0, 1) ** 1.3 * np.exp(-KK / 0.06)
-sp_ = (1.8 + 4.7 * flat) * (1 - 0.08 * r)          # 1.8 mm at edges -> ~6.5 mm on flats
-STRETCH = np.array([0.85, 1.0, 1.0])
+# ---- edge-graded cell size, smoothed over the surface (no local jitter)
+import scipy.sparse as sps
+G_DIR = att['g']
+sub = np.arange(0, len(P), 6)
+tsub = cKDTree(P[sub])
+Wm = tsub.sparse_distance_matrix(tsub, 3.5, output_type='coo_matrix')
+Wm = sps.csr_matrix((np.exp(-(Wm.data / 2.0) ** 2), (Wm.row, Wm.col)), shape=(len(sub), len(sub))) + sps.identity(len(sub))
+Wm = sps.diags(1 / np.asarray(Wm.sum(1)).ravel()) @ Wm
+nn_sub = tsub.query(P, workers=4)[1]
+def smooth(f, it=3):
+    fs = f[sub]
+    for _ in range(it): fs = Wm @ fs
+    return fs[nn_sub]
+flat = smooth(np.clip((RIM - 1.5) / 14.0, 0, 1) ** 1.3 * np.exp(-KK / 0.06))
+r = smooth(r)
+sp_ = 1.8 + 4.7 * flat                              # 1.8 mm at edges -> ~6.5 mm on flats
+STRETCH = np.array([1.0, 1.0, 1.0])
 Ps = P * STRETCH
 half = np.flatnonzero(P[:, 0] >= 0)
 order = rng.permutation(half)[: len(half) // 3]
@@ -75,11 +88,39 @@ for i in order:
         put(p); seeds.append(p)
         if p[0] > 0: put(m); seeds.append(m)
 seeds = np.array(seeds)
+
+# ---- flow-aligned anisotropic metric: cells 1/K_AN longer along the growth direction
+K_AN = 0.72
+def mtx(V, g):
+    """apply the local metric: compress the component along g by K_AN"""
+    return V - (1 - K_AN) * (V * g).sum(-1, keepdims=True) * g
+
+# ---- centroidal Voronoi relaxation (Lloyd), density ~ sp^-4, mirror symmetry kept
+H = seeds[seeds[:, 0] > 1e-9]; PL = seeds[np.abs(seeds[:, 0]) <= 1e-9]
+Psub = P[::2]; Gsub = G_DIR[::2]; wsub = sp_[::2] ** -4
+ptree = cKDTree(P)
+for it in range(22):
+    S_all = np.vstack([H, H * [-1, 1, 1], PL])
+    dd_, ii_ = cKDTree(S_all).query(Psub, k=6, workers=4)
+    Dm = mtx(S_all[ii_] - Psub[:, None], Gsub[:, None])
+    own = ii_[np.arange(len(Psub)), np.argmin((Dm ** 2).sum(2), 1)]
+    wsum = np.bincount(own, wsub, len(S_all))
+    cen = np.stack([np.bincount(own, wsub * Psub[:, k], len(S_all)) for k in range(3)], 1)
+    ok = wsum > 0
+    cen[ok] /= wsum[ok, None]; cen[~ok] = S_all[~ok]
+    nh = len(H)
+    Hn = 0.5 * (cen[:nh] + cen[nh:2 * nh] * [-1, 1, 1])
+    PLn = cen[2 * nh:]; PLn[:, 0] = 0.0
+    move = np.linalg.norm(Hn - H, axis=1).mean() if nh else 0
+    H = P[ptree.query(Hn, workers=4)[1]]; H[:, 0] = np.maximum(H[:, 0], 1e-6)
+    PL = P[ptree.query(PLn, workers=4)[1]]; PL[:, 0] = 0.0
+seeds = np.vstack([H, H * [-1, 1, 1], PL])
+print(f'CVT relaxed {len(seeds)} seeds, last mean move {move:.3f} mm')
 # ---- graded-aperture attributes
 # aperture 0 = original solid surface (edges, creases, socket), small = pin-holes,
 # 1 = fully open Voronoi cell.  Cell size follows the same field ("triangles grow").
 APER = np.clip((flat - 0.02) / 0.7, 0, 1) ** 1.3 * (1 - 0.2 * r)
-SH = dict(P=P, N=att['n'], tree=cKDTree(P), seeds=seeds, stree=cKDTree(seeds), rho=r, RIM=RIM, sp=sp_,
+SH = dict(P=P, N=att['n'], G=G_DIR, tree=cKDTree(P), seeds=seeds, stree=cKDTree(seeds), rho=r, RIM=RIM, sp=sp_,
           ap=APER, Q=Q)
 print(f'{len(P)} surface pts, {len(seeds)} Voronoi cells (symmetric), open area share {np.mean(APER > 0.5):.2f}, t={time.time()-t0:.0f}s')
 
@@ -99,21 +140,33 @@ def organic_sdf(X):
     v = X - S['P'][i]
     w = (v * S['N'][i]).sum(1)                                   # signed normal offset
     u = np.sqrt(np.maximum(d ** 2 - w ** 2, 0))                  # lateral offset beyond the outline
-    dd, ii = S['stree'].query(X * STRETCH, k=4, workers=4)
-    s1 = S['seeds'][ii[:, 0]]
-    es = np.stack([(dd[:, k] ** 2 - dd[:, 0] ** 2) / (2 * np.linalg.norm(S['seeds'][ii[:, k]] - s1, axis=1) + 1e-9)
-                   for k in range(1, 4)], 1)
-    e = -0.3 * np.log(np.exp(-es / 0.3).sum(1))                  # distance to the cell border
+    gx = S['G'][i][:, None]
+    _, ii = S['stree'].query(X, k=6, workers=4)
+    Dm = mtx(S['seeds'][ii] - X[:, None], gx)                  # seed offsets in the local metric
+    dm2 = (Dm ** 2).sum(2)
+    o = np.argsort(dm2, 1)[:, :4]
+    ii = np.take_along_axis(ii, o, 1); dm2 = np.take_along_axis(dm2, o, 1)
+    sm = S['seeds'][ii]
+    base = mtx(sm[:, 1:] - sm[:, :1], gx)
+    es = (dm2[:, 1:] - dm2[:, :1]) / (2 * np.linalg.norm(base, axis=2) + 1e-9)
     ap, spi, rho_i, rim = S['ap'][i], S['sp'][i], S['rho'][i], S['RIM'][i]
+    wsm = 0.10 * spi                                             # corner rounding scales with the cell
+    e = -wsm * np.log(np.exp(-es / wsm[:, None]).sum(1))         # distance to the cell border (metric)
     t = 1.6 + 0.4 * ap + 0.6 * np.exp(-rim / 1.5)                # skin 1.6 mm, deeper ribs where open
-    # hole: round pin-hole around the seed while the aperture is small,
-    # morphing into the (rounded) Voronoi polygon as the aperture opens
-    hw_open = 0.85 + 0.25 * rho_i                                 # rib half width of a fully open cell
-    circle = dd[:, 0] - ap * 0.62 * spi
+    # self-similar proportions: pin-hole radius, rib width and rounding all scale with the cell
+    hw_open = (0.55 + 0.12 * spi) * (0.92 + 0.16 * rho_i)        # rib half width of a fully open cell
+    circle = np.sqrt(dm2[:, 0]) - ap * 0.5 * spi
     poly = hw_open - e
     hole = (1 - ap) * circle + ap * poly                          # < 0 inside the hole
     g = hole                                                      # distance into material from the hole edge (>0)
-    rib = np.where(g < t / 2, np.hypot(t / 2 - g, w) - t / 2, np.abs(w) - t / 2)   # half-round (bull-nose) hole edge
+    # continuous Voronoi relief: where cells are closed the lattice lines carry on as
+    # soft ridges and the cell centres sink into shallow dimples, so the pattern never
+    # stops at the solid edge - it fades.  The pin-hole later opens in the dimple.
+    rf = np.clip(e / (0.42 * spi), 0, 1) ** 1.6
+    dim = (0.22 + 0.33 * (1 - ap)) * np.clip(rim / 3.0, 0, 1) * rf
+    th = t / 2 - dim / 2                                         # dimple on the outer face only
+    wc = w + dim / 2                                             # (skin stays >= 1.05 mm at a dimple)
+    rib = np.where(g < th, np.hypot(th - g, wc) - th, np.abs(wc) - th)  # half-round (bull-nose) hole edge
     # outline: the skin ends in a half-round edge of its own thickness
     rsg = rim - u                                                # signed in-surface distance to the outline
     cap = np.where(rsg < t / 2, np.hypot(t / 2 - rsg, w) - t / 2, -1e3)
@@ -121,9 +174,7 @@ def organic_sdf(X):
     # printed-strata texture on the skin (design intent, 1.2 mm pitch)
     rib += 0.08 * np.sin(2 * np.pi * X[:, 2] / 1.2) * (1 - ap) * np.clip(rim / 2.0, 0, 1)
     rib += cell_pattern(e, ii[:, 0], X)
-    rr = np.hypot(X[:, 0] - PEN_C[0], X[:, 1] - PEN_C[1])
-    floor = np.maximum(np.maximum(rr - (PEN_RB + 0.3), np.abs(X[:, 2] - PEN_ZB) - 0.8), 1.7 - rr)
-    return np.minimum(rib, floor)
+    return rib
 
 def full_sdf(X):
     d = organic_sdf(X)
@@ -177,7 +228,7 @@ ridge = (edt == ndimage.maximum_filter(edt, size=5)) & (edt > 1.5 * HF)
 wall = 2 * edt[ridge]
 print(f'wall thickness on medial ridge: p1={np.percentile(wall,1):.2f}  p5={np.percentile(wall,5):.2f}  median={np.median(wall):.2f} mm')
 
-D = ndimage.gaussian_filter(D, 0.6)          # removes voxel-scale MC ambiguities / jaggies
+D = ndimage.gaussian_filter(D, 0.35 / HF)     # melts every edge ~0.35 mm (soft, continuous lines)
 v, f, _, _ = measure.marching_cubes(D, 0.0, spacing=(HF, HF, HF))
 v += np.array([xf[0][0], xf[1][0], xf[2][0]])
 mesh = trimesh.Trimesh(v, f, process=True)

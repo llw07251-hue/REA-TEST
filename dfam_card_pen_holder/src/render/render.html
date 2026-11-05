@@ -1,0 +1,199 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>DfAM render</title>
+<style>html,body{margin:0;background:#ddd;overflow:hidden}</style>
+<script type="importmap">{"imports":{"three":"./three/build/three.module.js","three/addons/":"./three/examples/jsm/"}}</script>
+</head><body>
+<script type="module">
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
+
+const P = Object.assign({ w: 1600, h: 1100, view: 'hero', acc: 1, section: 0, bg: 'light', model: 'render.glb', fov: 30 },
+  JSON.parse(decodeURIComponent(location.hash.slice(1) || '{}')));
+
+const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
+renderer.setPixelRatio(1);
+renderer.setSize(P.w, P.h);
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = P.exposure || 1.0;
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.localClippingEnabled = true;
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+const pm = new THREE.PMREMGenerator(renderer);
+scene.environment = pm.fromScene(new RoomEnvironment(), 0.04).texture;
+scene.environmentIntensity = P.env ?? 0.55;
+
+// studio backdrop gradient
+const bgc = P.bg === 'dark' ? ['#2a2c30', '#0d0e10'] : ['#f3f2ef', '#c9c8c4'];
+{
+  const c = document.createElement('canvas'); c.width = 2; c.height = 512;
+  const g = c.getContext('2d'); const gr = g.createLinearGradient(0, 0, 0, 512);
+  gr.addColorStop(0, bgc[0]); gr.addColorStop(1, bgc[1]); g.fillStyle = gr; g.fillRect(0, 0, 2, 512);
+  const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace; scene.background = t;
+}
+
+const camera = new THREE.PerspectiveCamera(P.fov, P.w / P.h, 1, 5000);
+camera.up.set(0, 0, 1);
+
+// ground (shadow catcher)
+const ground = new THREE.Mesh(new THREE.PlaneGeometry(3000, 3000),
+  new THREE.ShadowMaterial({ opacity: P.bg === 'dark' ? 0.55 : 0.32 }));
+ground.position.z = -0.01; ground.receiveShadow = true; scene.add(ground);
+if (P.floor !== 0) {
+  const fl = new THREE.Mesh(new THREE.CircleGeometry(900, 96), new THREE.MeshStandardMaterial({
+    color: P.bg === 'dark' ? 0x1b1c1f : 0xd9d8d4, roughness: 0.95 }));
+  fl.position.z = -0.05; fl.receiveShadow = true; scene.add(fl);
+}
+
+// lights
+const key = new THREE.DirectionalLight(0xffffff, P.key ?? 2.6);
+key.position.set(-200, -170, 260); key.target.position.set(0, 34, 25);
+key.castShadow = true; key.shadow.mapSize.set(4096, 4096);
+Object.assign(key.shadow.camera, { left: -170, right: 170, top: 170, bottom: -170, near: 10, far: 900 });
+key.shadow.bias = -0.0004; key.shadow.normalBias = 0.25; key.shadow.radius = 4;
+scene.add(key, key.target);
+const rim = new THREE.DirectionalLight(0xdfe8ff, P.rim ?? 2.2); rim.position.set(260, 320, 140); scene.add(rim);
+const fill = new THREE.DirectionalLight(0xfff3e6, 0.7); fill.position.set(300, -200, 80); scene.add(fill);
+scene.add(new THREE.HemisphereLight(0xffffff, 0x777777, 0.35));
+
+// PA11 dyed-black material with micro-grain (MJF powder texture)
+function pa11(side = THREE.FrontSide, color = (P.col ?? 0x262626)) {
+  const m = new THREE.MeshPhysicalMaterial({ color, roughness: 0.74, metalness: 0.0, sheen: 0.6,
+    sheenRoughness: 0.6, sheenColor: new THREE.Color(0x777777), side });
+  m.onBeforeCompile = (s) => {
+    s.vertexShader = s.vertexShader.replace('#include <common>', '#include <common>\nvarying vec3 vWp;')
+      .replace('#include <worldpos_vertex>', '#include <worldpos_vertex>\nvWp = (modelMatrix*vec4(transformed,1.0)).xyz;');
+    s.fragmentShader = s.fragmentShader.replace('#include <common>', `#include <common>
+      varying vec3 vWp;
+      float h3(vec3 p){ p = fract(p*0.3183099+0.1); p*=17.0; return fract(p.x*p.y*p.z*(p.x+p.y+p.z)); }
+      float vn(vec3 x){ vec3 i=floor(x), f=fract(x); f=f*f*(3.0-2.0*f);
+        return mix(mix(mix(h3(i),h3(i+vec3(1,0,0)),f.x),mix(h3(i+vec3(0,1,0)),h3(i+vec3(1,1,0)),f.x),f.y),
+                   mix(mix(h3(i+vec3(0,0,1)),h3(i+vec3(1,0,1)),f.x),mix(h3(i+vec3(0,1,1)),h3(i+vec3(1,1,1)),f.x),f.y),f.z); }`)
+      .replace('#include <normal_fragment_maps>', `#include <normal_fragment_maps>
+      { float k = ${(P.grainScale || 9.0).toFixed(2)}; vec3 q = vWp*k;
+        vec3 gN = vec3(vn(q+vec3(.1,0,0))-vn(q-vec3(.1,0,0)), vn(q+vec3(0,.1,0))-vn(q-vec3(0,.1,0)), vn(q+vec3(0,0,.1))-vn(q-vec3(0,0,.1)));
+        normal = normalize(normal + ${(P.grain ?? 0.9).toFixed(2)} * gN); }`)
+      .replace('#include <roughnessmap_fragment>', `#include <roughnessmap_fragment>
+      roughnessFactor = clamp(roughnessFactor + 0.12*(vn(vWp*3.0)-0.5), 0.5, 1.0);`);
+  };
+  return m;
+}
+
+const clip = P.section ? [new THREE.Plane(new THREE.Vector3(...P.section.n), P.section.d)] : [];
+const root = new THREE.Group(); scene.add(root);
+
+function card(i, front) {
+  const c = document.createElement('canvas'); c.width = 900; c.height = 500;
+  const g = c.getContext('2d');
+  g.fillStyle = '#f7f6f2'; g.fillRect(0, 0, 900, 500);
+  if (front) {
+    g.fillStyle = '#121212'; g.fillRect(0, 0, 18, 500);
+    g.font = '700 54px "Noto Sans KR", sans-serif'; g.fillText('DfAM STUDIO', 70, 150);
+    g.font = '400 30px "Noto Sans KR", sans-serif'; g.fillStyle = '#555';
+    g.fillText('Additive Design Engineer', 70, 200);
+    g.fillStyle = '#121212'; g.font = '400 26px "Noto Sans KR", sans-serif';
+    g.fillText('HP Multi Jet Fusion  ·  PA 11', 70, 380); g.fillText('sample@dfam.studio', 70, 420);
+    g.strokeStyle = '#121212'; g.lineWidth = 3;
+    for (let k = 0; k < 7; k++) { g.beginPath(); g.arc(760, 250, 30 + k * 16, -1.2, 1.9); g.stroke(); }
+  }
+  const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace; t.anisotropy = 8;
+  const mats = [0, 0, 0, 0, 0, 0].map(() => new THREE.MeshStandardMaterial({ color: 0xf2f1ec, roughness: 0.9, clippingPlanes: clip }));
+  mats[4] = new THREE.MeshStandardMaterial({ map: t, roughness: 0.85, clippingPlanes: clip });
+  const m = new THREE.Mesh(new THREE.BoxGeometry(90, 50, 0.35), mats);
+  m.castShadow = m.receiveShadow = true;
+  return m;
+}
+function pen(col, capCol, len = 142) {
+  const g = new THREE.Group();
+  const bm = new THREE.MeshPhysicalMaterial({ color: col, roughness: 0.25, metalness: 0.2, clearcoat: 0.8, clippingPlanes: clip });
+  const mm = new THREE.MeshStandardMaterial({ color: 0xcfd2d6, roughness: 0.25, metalness: 1.0, clippingPlanes: clip });
+  const body = new THREE.Mesh(new THREE.CylinderGeometry(4.4, 4.6, len - 22, 40), bm); body.position.y = (len - 22) / 2 + 12;
+  const cone = new THREE.Mesh(new THREE.CylinderGeometry(4.4, 1.0, 12, 40), mm); cone.position.y = 6;
+  const tip = new THREE.Mesh(new THREE.SphereGeometry(0.8, 16, 16), mm); tip.position.y = 0;
+  const cap = new THREE.Mesh(new THREE.CylinderGeometry(4.2, 4.4, 10, 40), new THREE.MeshPhysicalMaterial({ color: capCol, roughness: 0.3, clearcoat: 1, clippingPlanes: clip }));
+  cap.position.y = len - 5;
+  const clipM = new THREE.Mesh(new THREE.BoxGeometry(2.2, 40, 1.4), mm); clipM.position.set(0, len - 22, 5.2);
+  [body, cone, tip, cap, clipM].forEach(o => { o.castShadow = o.receiveShadow = true; g.add(o); });
+  return g;
+}
+
+new GLTFLoader().load(P.model, (gltf) => {
+  gltf.scene.traverse(o => {
+    if (o.isMesh) {
+      o.geometry.computeVertexNormals();
+      const front = o; front.material = pa11(THREE.FrontSide); front.material.clippingPlanes = clip;
+      front.castShadow = true; front.receiveShadow = true;
+      if (P.section) {
+        const back = new THREE.Mesh(o.geometry, new THREE.MeshBasicMaterial({ color: 0xff5a1f, side: THREE.BackSide, clippingPlanes: clip }));
+        root.add(back);
+      }
+    }
+  });
+  root.add(gltf.scene);
+  for (let k = 1; k < (P.stack || 1); k++) { const c = gltf.scene.clone(true); c.position.z = k * P.pitch; root.add(c); }
+  if (P.hideMain) gltf.scene.visible = false;
+  (P.extra || []).forEach(e => new GLTFLoader().load(e.model, g2 => {
+    g2.scene.traverse(o => { if (o.isMesh) { o.geometry.computeVertexNormals();
+      o.material = e.pa11 ? pa11() : new THREE.MeshStandardMaterial({ color: e.color, roughness: 0.6, transparent: e.opacity < 1,
+        opacity: e.opacity, depthWrite: e.opacity >= 1, side: THREE.DoubleSide });
+      o.castShadow = e.opacity >= 1; o.receiveShadow = true; } });
+    root.add(g2.scene); window.__pending--; }));
+  window.__pending = (P.extra || []).length;
+  (P.arrows || []).forEach(([o, d, L, col]) => {
+    const dir = new THREE.Vector3(...d).normalize();
+    const a = new THREE.ArrowHelper(dir, new THREE.Vector3(...o).addScaledVector(dir, -L), L, col, L * 0.32, L * 0.16);
+    a.line.material.linewidth = 3; root.add(a);
+    const shaft = new THREE.Mesh(new THREE.CylinderGeometry(0.9, 0.9, L * 0.7, 12), new THREE.MeshBasicMaterial({ color: col }));
+    shaft.position.copy(new THREE.Vector3(...o).addScaledVector(dir, -L * 0.62));
+    shaft.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir); root.add(shaft);
+  });
+  (P.supports || []).forEach(([x, y]) => {
+    const c = new THREE.Mesh(new THREE.ConeGeometry(2.6, 5, 20), new THREE.MeshStandardMaterial({ color: 0x1565c0 }));
+    c.rotation.x = -Math.PI / 2; c.position.set(x, y, -0.5 - 2.5); c.rotation.x = Math.PI / 2; root.add(c);
+  });
+
+  if (P.acc) {
+    const tilt = 15 * Math.PI / 180;
+    for (let i = 0; i < 6; i++) {
+      const c = card(i, i === 5);
+      const sn = Math.sin(tilt), cs = Math.cos(tilt), yb = 19.0 - 0.95 * i, zb = 8.5;
+      c.rotation.set(Math.PI / 2 - tilt, 0, 0);
+      c.position.set(0, yb + 25 * sn - 0.2 * cs, zb + 25 * cs + 0.2 * sn);
+      root.add(c);
+    }
+    const p = pen(0x1d1d1f, 0x1d1d1f, 142);
+    p.rotation.x = Math.PI / 2;
+    const q = new THREE.Group(); q.add(p);
+    q.position.set(0, 45, 11.6);
+    q.rotation.set(-9 * Math.PI / 180, 3 * Math.PI / 180, 0);
+    root.add(q);
+  }
+
+  const V = {
+    hero: [[-150, -190, 150], [0, 34, 30]],
+    hero2: [[-140, -150, 62], [0, 34, 26]],
+    rear: [[150, 250, 140], [0, 36, 26]],
+    front: [[0, -300, 45], [0, 34, 28]],
+    left: [[-310, 34, 35], [0, 34, 28]],
+    top: [[0, 34, 400], [0, 34, 0]],
+    macro_socket: [[28, 8, 112], [0, 44, 40]],
+    macro_edge: [[-95, -45, 55], [-40, 15, 22]],
+    macro_field: [[40, 110, 70], [18, 60, 26]],
+    macro_trough: [[-30, -40, 30], [-15, 16, 10]],
+    section: [[-170, -60, 95], [0, 34, 26]],
+    stack: [[-200, -250, 200], [0, 34, 55]],
+  }[P.view];
+  const v = P.cam || V;
+  camera.position.set(...v[0]); camera.lookAt(new THREE.Vector3(...v[1]));
+  if (P.up) camera.up.set(...P.up);
+  camera.lookAt(new THREE.Vector3(...v[1]));
+  camera.updateProjectionMatrix();
+  const fin = () => { if (window.__pending > 0) return setTimeout(fin, 100);
+    renderer.render(scene, camera); renderer.render(scene, camera); window.__done = true; };
+  setTimeout(fin, 300);
+});
+</script></body></html>

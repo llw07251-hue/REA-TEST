@@ -1,0 +1,37 @@
+{
+ "volume_cm3": 15.47,
+ "mass_g": 16.2,
+ "bbox_mm": [
+  114.1,
+  101.9,
+  63.3
+ ],
+ "ref_solid_shell_2p5_cm3": 48.6,
+ "ref_solid_shell_mass_g": 51.1,
+ "ref_unperforated_cm3": 27.2,
+ "saving_vs_solid_shell_pct": 68.2,
+ "porosity_pct": 43.2,
+ "mid_surface_area_cm2": 194.6,
+ "surface_area_cm2": 299.4,
+ "faces_full": 1390632,
+ "watertight": true,
+ "enclosed_voids": 0,
+ "voxel_pockets_filled": 49,
+ "nonmanifold_edges": 0,
+ "islands_removed": 110,
+ "wall_p1_mm": 1.12,
+ "wall_p5_mm": 1.41,
+ "wall_median_mm": 1.5,
+ "voronoi_cells": 751,
+ "cell_size_mm": [
+  2.3,
+  10.3
+ ],
+ "stack_pitch_display_mm": 12.0,
+ "stack_pitch_build_mm": 26.0,
+ "stack_10_height_mm": 171.3,
+ "units_per_build_nested": 78,
+ "units_per_build_unnested": 30,
+ "symmetric": true,
+ "voxel_mm": 0.25
+}

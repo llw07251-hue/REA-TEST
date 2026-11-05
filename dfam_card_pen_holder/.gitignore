@@ -1,0 +1,3 @@
+model/*.stl
+model/render.glb
+src/__pycache__/

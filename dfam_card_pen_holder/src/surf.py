@@ -49,4 +49,11 @@ def sample(ds=0.2, g=0.3, seed=3):
     P = pts[keep]; P2 = P * [-1, 1, 1]
     P = np.vstack([P, P2])
     att = {k: np.concatenate([v[keep], v[keep]]) for k, v in att.items()}
+    # upward unit normals of the heightfield mid-surface (mirrored with the points)
+    vn = mesh.vertex_normals.copy()
+    vn[vn[:, 2] < 0] *= -1
+    N = np.stack([lerp(vn[:, k]) for k in range(3)], 1)[keep]
+    N2 = N * [-1, 1, 1]
+    N = np.vstack([N, N2]); N /= np.linalg.norm(N, axis=1, keepdims=True)
+    att['n'] = N
     return P, att, mesh

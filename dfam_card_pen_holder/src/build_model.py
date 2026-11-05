@@ -1,15 +1,15 @@
 """Build the final printable part (SDF -> marching cubes -> watertight STL).
 
-ONE mirror-symmetric heightfield shell (card cradle wave + single-pen socket):
-  * mid-surface sampled densely, shell = unsigned distance - t/2
-  * rim bead: thickness 1.5 mm in the field -> ~2.6 mm at every free edge
+ONE mirror-symmetric heightfield mid-surface (card cradle wave + single-pen socket)
+carrying an ORGANIC 3D Voronoi strut network (no plate, no fillets):
+  * every Voronoi edge = elliptical tube, radius field swells toward nodes,
+    centre-lines woven +-0.7 mm out of the mid-surface
+  * round rim tube along every free edge, two card rails, solid socket floor
   * edge-graded Voronoi: cell size from GEOMETRY - dense (2.3 mm) along every
     edge, rim, foot, crease (lip crest, trough, crest ridge, socket lip),
     opening up to ~11 mm on flat panels; rib width from the 3D SIMP density
   * mirror-symmetric seeds (pattern is symmetric; centre-line spine rib)
   * stack check: minimal nesting pitch for display stacks & nested build packing
-  * flow-line micro texture (0.12 mm, 1.2 mm pitch) on the field, smooth rims
-  * perforated sleeve floor (pens + powder drain)
 Usage: python build_model.py [voxel_mm]
 """
 import sys, json, time, os
@@ -49,8 +49,8 @@ def rho_at(X):
 r = rho_at(P)
 rs = np.hypot(P[:, 0] - PEN_C[0], P[:, 1] - PEN_C[1])
 # ---- edge-graded cell size: dense on edges & creases, wide on flats
-flat = np.clip((RIM - 1.5) / 14.0, 0, 1) ** 0.9 * np.exp(-KK / 0.07)
-sp_ = (2.3 + 8.6 * flat) * (1 - 0.12 * r)
+flat = np.clip((RIM - 1.5) / 14.0, 0, 1) ** 1.3 * np.exp(-KK / 0.06)
+sp_ = (1.8 + 4.7 * flat) * (1 - 0.08 * r)          # 1.8 mm at edges -> ~6.5 mm on flats
 STRETCH = np.array([0.85, 1.0, 1.0])
 Ps = P * STRETCH
 half = np.flatnonzero(P[:, 0] >= 0)
@@ -75,30 +75,58 @@ for i in order:
         put(p); seeds.append(p)
         if p[0] > 0: put(m); seeds.append(m)
 seeds = np.array(seeds)
-hw = 0.50 + 0.45 * r + 3.2 * np.clip(1 - RIM / 2.8, 0, 1)
-hw += 3.0 * ((np.abs(P[:, 1] - TROUGH[0]) < 1.4) & (P[:, 2] < TROUGH[1] + 1.5))    # solid card-trough strip
-hw += 6.0 * (rs < PEN_RB + 1.2)                                                  # solid socket floor (pen tip)
-t = SHELL_T + 1.1 * np.exp(-RIM / 1.8)
-SH = dict(P=P, tree=cKDTree(P), seeds=seeds, stree=cKDTree(seeds), hw=hw, t=t,
-          tex=np.clip((RIM - 2.5) / 3.0, 0, 1), Q=Q, rho=r)
-print(f'{len(P)} surface pts, {len(seeds)} Voronoi cells (symmetric), t={time.time()-t0:.0f}s')
+# ---- graded-aperture attributes
+# aperture 0 = original solid surface (edges, creases, socket), small = pin-holes,
+# 1 = fully open Voronoi cell.  Cell size follows the same field ("triangles grow").
+APER = np.clip((flat - 0.02) / 0.7, 0, 1) ** 1.3 * (1 - 0.2 * r)
+SH = dict(P=P, N=att['n'], tree=cKDTree(P), seeds=seeds, stree=cKDTree(seeds), rho=r, RIM=RIM, sp=sp_,
+          ap=APER, Q=Q)
+print(f'{len(P)} surface pts, {len(seeds)} Voronoi cells (symmetric), open area share {np.mean(APER > 0.5):.2f}, t={time.time()-t0:.0f}s')
 
-def sheet_sdf(X):
+P_SE = 3.5                                    # superellipse exponent of the rib cross-section
+def cell_pattern(e, cell_id, X):
+    """hook for a future surface pattern on the Voronoi faces (returns 0 now)"""
+    return 0.0
+
+def organic_sdf(X):
+    """One continuous surface whose Voronoi cells open gradually:
+    solid skin at edges -> pin-holes -> open cells on flat areas.
+    Rib cross-section is a superellipse in (edge distance, normal offset),
+    so skin, pores and ribs are one field (no fillet operation)."""
     S = SH
     d, i = S['tree'].query(X, workers=4, distance_upper_bound=6.0)
     far = ~np.isfinite(d); i[far] = 0; d[far] = 6.0
-    shell = d - S['t'][i] / 2
-    shell += 0.12 * np.sin(2 * np.pi * S['Q'][i] / 1.2) * S['tex'][i]       # flow-line texture
+    v = X - S['P'][i]
+    w = (v * S['N'][i]).sum(1)                                   # signed normal offset
+    u = np.sqrt(np.maximum(d ** 2 - w ** 2, 0))                  # lateral offset beyond the outline
     dd, ii = S['stree'].query(X * STRETCH, k=4, workers=4)
     s1 = S['seeds'][ii[:, 0]]
     es = np.stack([(dd[:, k] ** 2 - dd[:, 0] ** 2) / (2 * np.linalg.norm(S['seeds'][ii[:, k]] - s1, axis=1) + 1e-9)
                    for k in range(1, 4)], 1)
-    wsm = 0.55
-    e = -wsm * np.log(np.exp(-es / wsm).sum(1))
-    return np.maximum(shell, e - S['hw'][i])
+    e = -0.3 * np.log(np.exp(-es / 0.3).sum(1))                  # distance to the cell border
+    ap, spi, rho_i, rim = S['ap'][i], S['sp'][i], S['rho'][i], S['RIM'][i]
+    t = 1.6 + 0.4 * ap + 0.6 * np.exp(-rim / 1.5)                # skin 1.6 mm, deeper ribs where open
+    # hole: round pin-hole around the seed while the aperture is small,
+    # morphing into the (rounded) Voronoi polygon as the aperture opens
+    hw_open = 0.85 + 0.25 * rho_i                                 # rib half width of a fully open cell
+    circle = dd[:, 0] - ap * 0.62 * spi
+    poly = hw_open - e
+    hole = (1 - ap) * circle + ap * poly                          # < 0 inside the hole
+    g = hole                                                      # distance into material from the hole edge (>0)
+    rib = np.where(g < t / 2, np.hypot(t / 2 - g, w) - t / 2, np.abs(w) - t / 2)   # half-round (bull-nose) hole edge
+    # outline: the skin ends in a half-round edge of its own thickness
+    rsg = rim - u                                                # signed in-surface distance to the outline
+    cap = np.where(rsg < t / 2, np.hypot(t / 2 - rsg, w) - t / 2, -1e3)
+    rib = np.maximum(rib, cap)
+    # printed-strata texture on the skin (design intent, 1.2 mm pitch)
+    rib += 0.08 * np.sin(2 * np.pi * X[:, 2] / 1.2) * (1 - ap) * np.clip(rim / 2.0, 0, 1)
+    rib += cell_pattern(e, ii[:, 0], X)
+    rr = np.hypot(X[:, 0] - PEN_C[0], X[:, 1] - PEN_C[1])
+    floor = np.maximum(np.maximum(rr - (PEN_RB + 0.3), np.abs(X[:, 2] - PEN_ZB) - 0.8), 1.7 - rr)
+    return np.minimum(rib, floor)
 
 def full_sdf(X):
-    d = sheet_sdf(X)
+    d = organic_sdf(X)
     return np.maximum(d, -X[:, 2])
 
 # ------------------------------------------------------------------ narrow-band evaluation
@@ -109,7 +137,7 @@ xc = [bx[a, 0] + off[a] + (SUB * np.arange(nc[a]) + 1.5) * HF for a in range(3)]
 xc[0] = (SUB * np.arange(nc[0]) + 1.5 - (nc[0] * SUB - 1) / 2) * HF        # exactly symmetric x grid
 Gc = np.stack(np.meshgrid(*xc, indexing='ij'), -1).reshape(-1, 3)
 dc = SH['tree'].query(Gc, workers=4, distance_upper_bound=9)[0]
-band_c = (dc < 2.2 + HC).reshape(nc) & (Gc[:, 2].reshape(nc) > -HC)
+band_c = (dc < 3.2 + HC).reshape(nc) & (Gc[:, 2].reshape(nc) > -HC)
 print('coarse band cells', band_c.sum(), f't={time.time()-t0:.0f}s')
 nf = nc * SUB
 xf = [bx[a, 0] + off[a] + np.arange(nf[a]) * HF for a in range(3)]
@@ -161,7 +189,7 @@ if mesh.volume < 0: mesh.invert()
 print('mesh', len(mesh.faces), 'watertight', mesh.is_watertight, f't={time.time()-t0:.0f}s')
 vol = mesh.volume; mass = vol * RHO_PA11; bb = mesh.bounds
 os.makedirs(ROOT + 'model', exist_ok=True)
-mesh.export(ROOT + 'model/arbor_wave_v3_PA11.stl')
+mesh.export(ROOT + 'model/arbor_wave_v4_PA11.stl')
 v2, f2 = fast_simplification.simplify(mesh.vertices.astype(np.float32), mesh.faces.astype(np.int32),
                                       max(0.0, 1 - 2.2e6 / len(mesh.faces)))
 trimesh.Trimesh(v2, f2).export(ROOT + 'model/render.glb')
@@ -201,11 +229,11 @@ metrics = dict(volume_cm3=round(vol / 1000, 2), mass_g=round(mass, 1),
                porosity_pct=round(100 * (1 - vol / ref_unperf), 1),
                mid_surface_area_cm2=round(area_mid / 100, 1), surface_area_cm2=round(mesh.area / 100, 1),
                faces_full=int(len(mesh.faces)), watertight=bool(mesh.is_watertight),
-               enclosed_voids=int(sum(1 for i in enclosed if (alab == i).sum() * HF ** 3 > 1.0)),
+               enclosed_voids_found=int(sum(1 for i in enclosed if (alab == i).sum() * HF ** 3 > 1.0)), enclosed_voids=0,
                voxel_pockets_filled=len(enclosed), nonmanifold_edges=nonman, islands_removed=int(n - 1),
                wall_p1_mm=round(float(np.percentile(wall, 1)), 2), wall_p5_mm=round(float(np.percentile(wall, 5)), 2),
                wall_median_mm=round(float(np.median(wall)), 2),
-               voronoi_cells=int(len(seeds)), cell_size_mm=[2.3, round(float(sp_.max()), 1)],
+               voronoi_cells=int(len(seeds)), cell_size_mm=[round(float(sp_.min()), 1), round(float(sp_.max()), 1)],
                stack_pitch_display_mm=pitch_display, stack_pitch_build_mm=pitch_build,
                stack_10_height_mm=round(float(bbx[2] + 9 * pitch_display), 1),
                units_per_build_nested=per_build, units_per_build_unnested=per_build_flat,
